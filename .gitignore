@@ -1,0 +1,14 @@
+# Database
+*.db
+
+# Python
+__pycache__/
+*.py[cod]
+.env
+
+# OS
+.DS_Store
+
+# CSV data files
+*.csv
+.claude/
