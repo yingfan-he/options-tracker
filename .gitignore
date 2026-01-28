@@ -1,9 +1,19 @@
 # Database
+*.db
 
 # Python
 __pycache__/
 *.py[cod]
 .env
+venv/
+backend/venv/
+
+# Node
+node_modules/
+frontend/node_modules/
+
+# Build outputs (Render will build fresh)
+frontend/dist/
 
 # OS
 .DS_Store

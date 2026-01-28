@@ -1,7 +1,6 @@
 """
 Database module for Options Trading Tracker.
 Handles SQLite connection, schema creation, and CRUD operations.
-Supports: Options, Stocks, and Spreads.
 """
 
 import os
@@ -10,7 +9,7 @@ from datetime import date, datetime
 from typing import Optional
 import pandas as pd
 
-# Use absolute path so the database is always found regardless of working directory
+# Use absolute path - database stored in backend folder
 DATABASE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "options_tracker.db")
 
 
@@ -25,9 +24,6 @@ def init_db():
     """Initialize the database schema."""
     conn = get_connection()
     cursor = conn.cursor()
-
-    # Drop old table if schema changed (for development)
-    # cursor.execute("DROP TABLE IF EXISTS trades")
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS trades (
@@ -106,44 +102,57 @@ def add_trade(
     return trade_id
 
 
-def get_all_trades() -> pd.DataFrame:
-    """Get all trades as a DataFrame."""
+def get_trade_by_id(trade_id: int) -> Optional[dict]:
+    """Get a single trade by ID."""
     conn = get_connection()
-    df = pd.read_sql_query("""
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM trades WHERE id = ?", (trade_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return dict(row)
+    return None
+
+
+def get_all_trades() -> list[dict]:
+    """Get all trades as a list of dicts."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
         SELECT
             t.id, t.ticker, t.asset_type, t.option_type, t.action,
             t.strike_price, t.strike_price_2, t.expiration_date, t.trade_date,
             t.underlying_price, t.quantity, t.price_per_unit, t.fees, t.notes,
-            t.linked_trade_id, COALESCE(t.status, 'Open') as status, t.created_at,
-            lt.ticker as linked_ticker,
-            lt.strike_price as linked_strike,
-            lt.expiration_date as linked_expiration
+            t.linked_trade_id, COALESCE(t.status, 'Open') as status, t.created_at
         FROM trades t
-        LEFT JOIN trades lt ON t.linked_trade_id = lt.id
         ORDER BY t.trade_date DESC, t.id DESC
-    """, conn, parse_dates=['trade_date', 'expiration_date', 'created_at'])
+    """)
+    rows = cursor.fetchall()
     conn.close()
-    return df
+    return [dict(row) for row in rows]
 
 
-def get_open_positions() -> pd.DataFrame:
+def get_open_positions() -> list[dict]:
     """Get option trades that haven't been closed/expired/assigned yet."""
     conn = get_connection()
-    df = pd.read_sql_query("""
+    cursor = conn.cursor()
+    cursor.execute("""
         SELECT * FROM trades t
         WHERE asset_type = 'Option'
         AND action IN ('STO', 'BTO')
         AND (status IS NULL OR status = 'Open')
         ORDER BY expiration_date ASC
-    """, conn, parse_dates=['trade_date', 'expiration_date'])
+    """)
+    rows = cursor.fetchall()
     conn.close()
-    return df
+    return [dict(row) for row in rows]
 
 
-def get_stock_positions() -> pd.DataFrame:
+def get_stock_positions() -> list[dict]:
     """Get current stock positions (net of buys and sells)."""
     conn = get_connection()
-    df = pd.read_sql_query("""
+    cursor = conn.cursor()
+    cursor.execute("""
         SELECT
             ticker,
             SUM(CASE WHEN action = 'Buy' THEN quantity ELSE -quantity END) as shares,
@@ -153,12 +162,13 @@ def get_stock_positions() -> pd.DataFrame:
         GROUP BY ticker
         HAVING shares > 0
         ORDER BY ticker
-    """, conn)
+    """)
+    rows = cursor.fetchall()
     conn.close()
-    return df
+    return [dict(row) for row in rows]
 
 
-def get_unique_tickers() -> list:
+def get_unique_tickers() -> list[str]:
     """Get list of unique tickers."""
     conn = get_connection()
     cursor = conn.cursor()
@@ -169,14 +179,10 @@ def get_unique_tickers() -> list:
 
 
 def calculate_position_pnl(opening_trade_id: int) -> dict:
-    """
-    Calculate P&L for a position (opening trade + any closing trade).
-    Returns dict with pnl, status, and details.
-    """
+    """Calculate P&L for a position (opening trade + any closing trade)."""
     conn = get_connection()
     cursor = conn.cursor()
 
-    # Get opening trade
     cursor.execute("SELECT * FROM trades WHERE id = ?", (opening_trade_id,))
     row = cursor.fetchone()
     if not row:
@@ -185,7 +191,6 @@ def calculate_position_pnl(opening_trade_id: int) -> dict:
 
     opening = dict(row)
 
-    # Get closing trade if exists
     cursor.execute("SELECT * FROM trades WHERE linked_trade_id = ?", (opening_trade_id,))
     closing_row = cursor.fetchone()
     closing = dict(closing_row) if closing_row else None
@@ -194,7 +199,6 @@ def calculate_position_pnl(opening_trade_id: int) -> dict:
 
     asset_type = opening.get('asset_type', 'Option')
 
-    # For stocks, P&L is simpler
     if asset_type == 'Stock':
         if opening['action'] == 'Buy':
             cost = opening['price_per_unit'] * opening['quantity'] + opening['fees']
@@ -204,9 +208,7 @@ def calculate_position_pnl(opening_trade_id: int) -> dict:
             return {'pnl': -cost, 'status': 'Open', 'opening_trade': opening, 'closing_trade': None}
         return {'pnl': 0, 'status': 'N/A', 'opening_trade': opening, 'closing_trade': closing}
 
-    # For spreads, calculate net premium
     if asset_type == 'Spread':
-        # Spreads: price_per_unit is net premium (can be positive or negative)
         multiplier = 100
         net_premium = opening['price_per_unit'] * opening['quantity'] * multiplier
         fees = opening['fees']
@@ -214,7 +216,7 @@ def calculate_position_pnl(opening_trade_id: int) -> dict:
         if closing:
             close_premium = closing['price_per_unit'] * closing['quantity'] * multiplier
             fees += closing['fees']
-            pnl = net_premium + close_premium - fees  # Both could be + or -
+            pnl = net_premium + close_premium - fees
             status = 'Closed'
         else:
             pnl = net_premium - fees
@@ -226,7 +228,6 @@ def calculate_position_pnl(opening_trade_id: int) -> dict:
     multiplier = 100
 
     if opening['action'] == 'STO':
-        # Received premium when sold to open
         credit = opening['price_per_unit'] * opening['quantity'] * multiplier
         fees = opening['fees']
 
@@ -250,7 +251,6 @@ def calculate_position_pnl(opening_trade_id: int) -> dict:
             status = 'Open'
 
     elif opening['action'] == 'BTO':
-        # Paid premium when bought to open
         debit = opening['price_per_unit'] * opening['quantity'] * multiplier
         fees = opening['fees']
 
@@ -286,14 +286,12 @@ def get_pnl_summary() -> dict:
     conn = get_connection()
     cursor = conn.cursor()
 
-    # Get all opening option trades
     cursor.execute("""
         SELECT id FROM trades
         WHERE asset_type = 'Option' AND action IN ('STO', 'BTO')
     """)
     option_ids = [row[0] for row in cursor.fetchall()]
 
-    # Get all spread trades (opening)
     cursor.execute("""
         SELECT id FROM trades
         WHERE asset_type = 'Spread' AND linked_trade_id IS NULL
@@ -318,7 +316,6 @@ def get_pnl_summary() -> dict:
         if result['closing_trade']:
             total_fees += result['closing_trade']['fees']
 
-    # Calculate stock P&L separately
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -341,7 +338,7 @@ def get_pnl_summary() -> dict:
     }
 
 
-def get_premium_by_period(period: str = 'month') -> pd.DataFrame:
+def get_premium_by_period(period: str = 'month') -> list[dict]:
     """Get net premium aggregated by period (options only)."""
     conn = get_connection()
 
@@ -369,9 +366,11 @@ def get_premium_by_period(period: str = 'month') -> pd.DataFrame:
         ORDER BY period DESC
     """
 
-    df = pd.read_sql_query(query, conn)
+    cursor = conn.cursor()
+    cursor.execute(query)
+    rows = cursor.fetchall()
     conn.close()
-    return df
+    return [dict(row) for row in rows]
 
 
 def delete_trade(trade_id: int) -> bool:
@@ -424,7 +423,6 @@ def insert_sample_data():
 
     today = date.today()
 
-    # Sample option trades
     add_trade(
         ticker='AAPL', asset_type='Option', option_type='Call', action='STO',
         strike_price=180, expiration_date=today - timedelta(days=30),
@@ -438,14 +436,12 @@ def insert_sample_data():
         fees=0.65, notes='Closed early', linked_trade_id=1
     )
 
-    # Sample stock trade
     add_trade(
         ticker='NVDA', asset_type='Stock', action='Buy',
         trade_date=today - timedelta(days=20), quantity=100, price_per_unit=180.00,
         fees=0, notes='Long position'
     )
 
-    # Sample spread
     add_trade(
         ticker='TSLA', asset_type='Spread', option_type='Call', action='BTO',
         strike_price=440, strike_price_2=450, expiration_date=today + timedelta(days=30),
