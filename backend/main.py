@@ -230,8 +230,13 @@ async def preview_csv(file: UploadFile = File(...)):
 async def import_csv(file: UploadFile = File(...), mapping: str = Form(...)):
     """Import trades from CSV with column mapping."""
     import json
+    import traceback
 
-    content = await file.read()
+    try:
+        content = await file.read()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error reading file: {str(e)}")
+
     try:
         df = pd.read_csv(StringIO(content.decode('utf-8')))
     except Exception as e:
@@ -242,8 +247,8 @@ async def import_csv(file: UploadFile = File(...), mapping: str = Form(...)):
 
     try:
         col_map = json.loads(mapping)
-    except:
-        raise HTTPException(status_code=400, detail="Invalid mapping JSON")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid mapping JSON: {str(e)}")
 
     imported = 0
     errors = []
@@ -253,32 +258,41 @@ async def import_csv(file: UploadFile = File(...), mapping: str = Form(...)):
             raw_action = str(row[col_map['action_col']]).lower().strip()
             ticker = str(row[col_map['ticker_col']]).upper().strip()
 
+            # Initialize variables
+            strike_2 = None
+            strike = None
+            exp_date = None
+            option_type = None
+
             # Determine asset type and parse action
             if "stock" in raw_action or "etf" in raw_action:
                 asset_type = "Stock"
                 action = "Buy" if "buy" in raw_action else "Sell"
-                option_type = None
-                strike = None
-                exp_date = None
             elif "spread" in raw_action or "collar" in raw_action:
                 asset_type = "Spread"
                 option_type = "Call" if "call" in raw_action else "Put"
                 action = "BTO"
                 strike_col = col_map.get('strike_col')
                 strike_val = str(row.get(strike_col, "")) if strike_col else ""
-                if "-" in strike_val:
-                    parts = strike_val.replace("$", "").split("-")
-                    strike = float(parts[0])
-                    strike_2 = float(parts[1]) if len(parts) > 1 else None
-                else:
-                    strike = float(strike_val) if strike_val else None
-                    strike_2 = None
+                if strike_val and strike_val != "nan":
+                    if "-" in strike_val:
+                        parts = strike_val.replace("$", "").split("-")
+                        strike = float(parts[0]) if parts[0] else None
+                        strike_2 = float(parts[1]) if len(parts) > 1 and parts[1] else None
+                    else:
+                        try:
+                            strike = float(strike_val.replace("$", ""))
+                        except:
+                            strike = None
                 exp_col = col_map.get('exp_date_col')
-                exp_date = pd.to_datetime(row[exp_col]).date() if exp_col and pd.notna(row.get(exp_col)) else None
+                if exp_col and col_map.get('exp_date_col') and pd.notna(row.get(exp_col)):
+                    try:
+                        exp_date = pd.to_datetime(row[exp_col]).date()
+                    except:
+                        exp_date = None
             else:
                 asset_type = "Option"
                 action = None
-                option_type = None
 
                 if "sto" in raw_action or "sell to open" in raw_action:
                     action = "STO"
@@ -299,25 +313,52 @@ async def import_csv(file: UploadFile = File(...), mapping: str = Form(...)):
                     continue
 
                 strike_col = col_map.get('strike_col')
-                strike = float(row[strike_col]) if strike_col and pd.notna(row.get(strike_col)) else None
-                strike_2 = None
+                if strike_col and pd.notna(row.get(strike_col)):
+                    try:
+                        strike = float(str(row[strike_col]).replace("$", "").replace(",", ""))
+                    except:
+                        strike = None
+
                 exp_col = col_map.get('exp_date_col')
-                exp_date = pd.to_datetime(row[exp_col]).date() if exp_col and pd.notna(row.get(exp_col)) else None
+                if exp_col and pd.notna(row.get(exp_col)):
+                    try:
+                        exp_date = pd.to_datetime(row[exp_col]).date()
+                    except:
+                        exp_date = None
 
             # Parse trade date
-            t_date = pd.to_datetime(row[col_map['trade_date_col']]).date()
+            try:
+                t_date = pd.to_datetime(row[col_map['trade_date_col']]).date()
+            except Exception as e:
+                errors.append(f"Row {idx+2}: Cannot parse trade date - {str(e)}")
+                continue
 
             # Parse numbers
-            qty = int(abs(float(row[col_map['quantity_col']])))
-            price = abs(float(row[col_map['price_col']]))
+            try:
+                qty_val = str(row[col_map['quantity_col']]).replace(",", "")
+                qty = int(abs(float(qty_val)))
+            except Exception as e:
+                errors.append(f"Row {idx+2}: Cannot parse quantity - {str(e)}")
+                continue
+
+            try:
+                price_val = str(row[col_map['price_col']]).replace("$", "").replace(",", "")
+                price = abs(float(price_val))
+            except Exception as e:
+                errors.append(f"Row {idx+2}: Cannot parse price - {str(e)}")
+                continue
 
             notes_col = col_map.get('notes_col')
-            notes = str(row[notes_col]) if notes_col and pd.notna(row.get(notes_col)) else ""
+            notes = ""
+            if notes_col and pd.notna(row.get(notes_col)):
+                notes = str(row[notes_col])
+                if notes == "nan":
+                    notes = ""
 
             # Check expired
             is_expired = False
             expired_col = col_map.get('expired_col')
-            if expired_col:
+            if expired_col and row.get(expired_col):
                 exp_val = str(row.get(expired_col, "")).strip().lower()
                 is_expired = exp_val in ["yes", "y", "true", "1", "expired"]
 
