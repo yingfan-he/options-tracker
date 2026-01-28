@@ -3,7 +3,7 @@ FastAPI backend for Options Trading Tracker.
 """
 
 import os
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -227,7 +227,7 @@ async def preview_csv(file: UploadFile = File(...)):
 
 
 @app.post("/api/import/process")
-async def import_csv(file: UploadFile = File(...), mapping: str = None):
+async def import_csv(file: UploadFile = File(...), mapping: str = Form(...)):
     """Import trades from CSV with column mapping."""
     import json
 
